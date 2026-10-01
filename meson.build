@@ -479,6 +479,15 @@ gc_array_cards_test = executable(
 )
 test('gc-array-cards', gc_array_cards_test)
 
+ic_identity_wrap_test = executable(
+  'test-ic-identity-wrap',
+  files('tests/test_ic_identity_wrap.c'),
+  dependencies: libant_dep,
+  c_args: ['-UNDEBUG'],
+  build_by_default: false
+)
+test('ic-identity-wrap', ic_identity_wrap_test)
+
 upvalue_close_order_test = executable(
   'test-upvalue-close-order',
   files('tests/test_upvalue_close_order.c'),

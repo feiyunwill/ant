@@ -79,6 +79,14 @@ void sv_gf_mega_clear(ant_t *js) {
   sv_gf_mega_clear_entries(cache->secondary, SV_GF_MEGA_SECONDARY);
 }
 
+__attribute__((noinline, cold)) void sv_ic_identities_reset(ant_t *js) {
+  ant_fixed_arena_t *oa = &js->obj_arena;
+  for (size_t off = oa->elem_size; off <= oa->watermark; off += oa->elem_size) {
+    ant_object_t *obj = (ant_object_t *)(oa->base + off - oa->elem_size);
+    if (obj->mark_epoch != ANT_GC_DEAD) obj->ic_identity = 0;
+  }
+}
+
 bool sv_ic_shape_ref_reserve(ant_t *js, size_t count) {
   if (!js) return false;
   if (js->ic.shape_ref_cap - js->ic.shape_ref_len >= count) return true;

@@ -186,6 +186,10 @@ static_assert(
   "IC flags must not share bits"
 );
 
+static constexpr uint32_t SV_IC_IDENTITY_MAX =
+  UINTPTR_MAX > UINT32_MAX ?
+  UINT32_MAX  : (uint32_t)(UINTPTR_MAX >> 1);
+
 typedef struct {
   ant_shape_t *shape;
   ant_value_t receiver_proto;
@@ -226,6 +230,7 @@ struct sv_gf_mega_cache {
 
 sv_gf_mega_cache_t *sv_gf_mega_ensure(ant_t *js);
 void sv_gf_mega_clear(ant_t *js);
+void sv_ic_identities_reset(ant_t *js);
 
 typedef struct sv_gf_poly {
   sv_gf_poly_entry_t entries[SV_GF_POLY_WAYS];

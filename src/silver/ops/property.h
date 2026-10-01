@@ -208,10 +208,6 @@ static inline void sv_gf_ic_set_proto_id(sv_ic_entry_t *ic, uint32_t id) {
 }
 #endif
 
-static constexpr uint32_t SV_IC_IDENTITY_MAX = UINTPTR_MAX > UINT32_MAX 
-  ? UINT32_MAX 
-  : (uint32_t)(UINTPTR_MAX >> 1);
-
 static inline uint32_t sv_ic_object_identity(ant_t *js, ant_object_t *obj) {
   if (!js || !obj) return 0;
   if (obj->ic_identity != 0) return obj->ic_identity;
@@ -219,6 +215,7 @@ static inline uint32_t sv_ic_object_identity(ant_t *js, ant_object_t *obj) {
   uint32_t id = js->ic.next_object_identity;
   if (__builtin_expect(id >= SV_IC_IDENTITY_MAX, 0)) {
     ant_ic_epoch_bump();
+    sv_ic_identities_reset(js);
     id = 0;
   }
   
