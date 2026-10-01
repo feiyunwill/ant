@@ -60,16 +60,6 @@ static inline bool gc_get_stack_bounds(
   return true;
 }
 
-// TODO: move to isolate
-static gc_func_mark_profile_t g_gc_func_mark_profile = {0};
-
-static uint32_t g_gc_func_mark_profile_depth = 0;
-static uint64_t g_gc_func_mark_profile_start_ns = 0;
-
-static uint64_t gc_epoch = 0;
-static uint8_t gc_obj_epoch = 0;
-static bool g_minor_gc = false;
-
 static_assert(
   offsetof(sv_closure_t, call_flags) == 0,
   "closure arena free-list links must overlay call_flags"
@@ -81,23 +71,23 @@ static_assert(
   "HAS_BOUND_ARGS must remain in the pointer-alignment-zero low bits"
 );
 
-void gc_func_mark_profile_enable(bool enabled) {
-  g_gc_func_mark_profile.enabled = enabled;
+void gc_func_mark_profile_enable(ant_t *js, bool enabled) {
+  js->gc.func_profile.enabled = enabled;
 }
 
-void gc_func_mark_profile_reset(void) {
-  bool enabled = g_gc_func_mark_profile.enabled;
-  g_gc_func_mark_profile = (gc_func_mark_profile_t){ .enabled = enabled };
-  g_gc_func_mark_profile_depth = 0;
-  g_gc_func_mark_profile_start_ns = 0;
+void gc_func_mark_profile_reset(ant_t *js) {
+  bool enabled = js->gc.func_profile.enabled;
+  js->gc.func_profile = (gc_func_mark_profile_t){ .enabled = enabled };
+  js->gc.func_profile_depth = 0;
+  js->gc.func_profile_start_ns = 0;
 }
 
-gc_func_mark_profile_t gc_func_mark_profile_get(void) {
-  return g_gc_func_mark_profile;
+gc_func_mark_profile_t gc_func_mark_profile_get(ant_t *js) {
+  return js->gc.func_profile;
 }
 
-bool gc_obj_is_marked(const ant_object_t *obj) {
-  return obj && obj->mark_epoch == gc_obj_epoch;
+bool gc_obj_is_marked(ant_t *js, const ant_object_t *obj) {
+  return obj && obj->mark_epoch == js->gc.obj_epoch;
 }
 
 static void gc_obj_epoch_wrapped(ant_t *js) {
@@ -322,7 +312,7 @@ static void gc_sweep_young_closures(ant_t *js) {
   ant_fixed_arena_t *ca = &js->closure_arena;
   for (size_t i = 0; i < js->young_closure_len; i++) {
     sv_closure_t *c = js->young_closures[i];
-    if (c->gc_epoch == gc_epoch) {
+    if (c->gc_epoch == js->gc.epoch) {
       c->generation = 1;
       js->gc_closure_promoted_since_major++;
       continue;
@@ -345,11 +335,12 @@ static void gc_sweep_young_upvalues(ant_t *js) {
   ant_fixed_arena_t *ua = &js->upvalue_arena;
   for (size_t i = 0; i < js->young_upvalue_len; i++) {
     struct sv_upvalue *uv = js->young_upvalues[i];
-    if (uv->gc_epoch == gc_epoch) continue;
+    if (uv->gc_epoch == js->gc.epoch) continue;
     fixed_arena_free_elem(ua, uv);
   }
+  
   js->young_upvalue_len = 0;
-
+  
   js->young_upvalues = shrink_ptr_roster(
     js->young_upvalues, &js->young_upvalue_cap,
     GC_YOUNG_ROSTER_RETAIN_CAP
@@ -357,29 +348,25 @@ static void gc_sweep_young_upvalues(ant_t *js) {
 }
 
 #define GC_MARK_STACK_INIT 4096
-
-static ant_object_t **gc_mark_stack = NULL;
 static void gc_mark_promise_handlers(ant_t *js, ant_promise_state_t *pd);
 
-static size_t gc_mark_sp   = 0;
-static size_t gc_mark_cap  = 0;
-
-static void gc_mark_stack_push(ant_object_t *obj) {
-  if (gc_mark_sp >= gc_mark_cap) {
-    size_t new_cap = gc_mark_cap ? gc_mark_cap * 2 : GC_MARK_STACK_INIT;
-    ant_object_t **ns = realloc(gc_mark_stack, new_cap * sizeof(*ns));
+static void gc_mark_stack_push(ant_t *js, ant_object_t *obj) {
+  if (js->gc.mark_sp >= js->gc.mark_cap) {
+    size_t new_cap = js->gc.mark_cap ? js->gc.mark_cap * 2 : GC_MARK_STACK_INIT;
+    ant_object_t **ns = realloc(js->gc.mark_stack, new_cap * sizeof(*ns));
     if (!ns) return;
-    gc_mark_stack = ns;
-    gc_mark_cap = new_cap;
+    js->gc.mark_stack = ns;
+    js->gc.mark_cap = new_cap;
   }
-  gc_mark_stack[gc_mark_sp++] = obj;
+  
+  js->gc.mark_stack[js->gc.mark_sp++] = obj;
 }
 
-static inline void gc_grey_obj(ant_object_t *obj) {
-  if (obj->mark_epoch == gc_obj_epoch || obj->mark_epoch == ANT_GC_DEAD) return;
-  if (g_minor_gc && obj->flags.generation == 1) return;
-  obj->mark_epoch = gc_obj_epoch;
-  gc_mark_stack_push(obj);
+static inline void gc_grey_obj(ant_t *js, ant_object_t *obj) {
+  if (obj->mark_epoch == js->gc.obj_epoch || obj->mark_epoch == ANT_GC_DEAD) return;
+  if (js->gc.minor && obj->flags.generation == 1) return;
+  obj->mark_epoch = js->gc.obj_epoch;
+  gc_mark_stack_push(js, obj);
 }
 
 static inline void gc_mark_string_exact(ant_t *js, ant_value_t v) {
@@ -409,17 +396,17 @@ static inline void gc_mark_string_conservative(ant_t *js, ant_value_t w) {
 
 static void gc_mark_func(ant_t *js, sv_func_t *func) {
   if (!func) return;
-  if (func->gc_epoch == gc_epoch) return;
+  if (func->gc_epoch == js->gc.epoch) return;
 
-  bool prof = __builtin_expect(g_gc_func_mark_profile.enabled, 0);
+  bool prof = __builtin_expect(js->gc.func_profile.enabled, 0);
   if (prof) {
-    if (g_gc_func_mark_profile_depth++ == 0) g_gc_func_mark_profile_start_ns = gc_now_ns();
-    g_gc_func_mark_profile.func_visits++;
-    g_gc_func_mark_profile.child_edges += (uint64_t)func->child_func_count;
-    g_gc_func_mark_profile.const_slots += (uint64_t)func->gc_const_slot_count;
+    if (js->gc.func_profile_depth++ == 0) js->gc.func_profile_start_ns = gc_now_ns();
+    js->gc.func_profile.func_visits++;
+    js->gc.func_profile.child_edges += (uint64_t)func->child_func_count;
+    js->gc.func_profile.const_slots += (uint64_t)func->gc_const_slot_count;
   }
 
-  func->gc_epoch = gc_epoch;
+  func->gc_epoch = js->gc.epoch;
 
   for (int i = 0; i < func->child_func_count; i++) 
     gc_mark_func(js, func->child_funcs[i]);
@@ -436,8 +423,8 @@ static void gc_mark_func(ant_t *js, sv_func_t *func) {
     gc_mark_value(js, v);
   }
 
-  if (prof && --g_gc_func_mark_profile_depth == 0)
-    g_gc_func_mark_profile.time_ns += gc_now_ns() - g_gc_func_mark_profile_start_ns;
+  if (prof && --js->gc.func_profile_depth == 0)
+    js->gc.func_profile.time_ns += gc_now_ns() - js->gc.func_profile_start_ns;
 }
 
 void gc_mark_upvalue_cells(ant_t *js, sv_upvalue_t *const *cells, uint32_t count) {
@@ -445,16 +432,16 @@ void gc_mark_upvalue_cells(ant_t *js, sv_upvalue_t *const *cells, uint32_t count
   for (uint32_t i = 0; i < count; i++) {
     sv_upvalue_t *uv = cells[i];
     if (!uv) continue;
-    uv->gc_epoch = gc_epoch;
+    uv->gc_epoch = js->gc.epoch;
     gc_mark_value(js, *uv->location);
   }
 }
 
 void gc_mark_closure(ant_t *js, sv_closure_t *c) {
   if (!c) return;
-  if (c->gc_epoch == gc_epoch) return;
+  if (c->gc_epoch == js->gc.epoch) return;
   
-  c->gc_epoch = gc_epoch;
+  c->gc_epoch = js->gc.epoch;
   if (js->weak_gc.pending_active)
     gc_weak_key_marked(js, mkref(kTypeFunction, c));
   gc_mark_func(js, c->func);
@@ -493,7 +480,7 @@ void gc_mark_value(ant_t *js, ant_value_t v) {
   }
 
   if (t == kTypeSymbol) {
-    bool newly_marked = js_symbol_gc_mark(v, gc_epoch);
+    bool newly_marked = js_symbol_gc_mark(v, js->gc.epoch);
     if (newly_marked && js->weak_gc.pending_active)
       gc_weak_key_marked(js, v);
     return;
@@ -505,7 +492,7 @@ void gc_mark_value(ant_t *js, ant_value_t v) {
   uintptr_t offset = (uintptr_t)obj - (uintptr_t)js->obj_arena.base;
   if (offset >= js->obj_arena.watermark) return;
   
-  gc_grey_obj(obj);
+  gc_grey_obj(js, obj);
 }
 
 static void gc_scan_obj(ant_t *js, ant_object_t *obj) {
@@ -565,7 +552,7 @@ static void gc_scan_obj(ant_t *js, ant_object_t *obj) {
 
   if (obj->type_tag == kTypeArray && obj->u.array.data) {
     uint32_t n = obj->u.array.len < obj->u.array.cap ? obj->u.array.len : obj->u.array.cap;
-    gc_card_table_t *cards = g_minor_gc && obj->u.array.cap >= GC_CARD_MIN_CAP
+    gc_card_table_t *cards = js->gc.minor && obj->u.array.cap >= GC_CARD_MIN_CAP
       ? gc_cards_of(obj) : NULL;
     // TODO: reduce nesting
     if (cards && !cards->all_dirty) {
@@ -618,8 +605,8 @@ static void gc_scan_obj(ant_t *js, ant_object_t *obj) {
 }
 
 static void gc_drain_mark_stack(ant_t *js) {
-while (gc_mark_sp > 0) {
-  ant_object_t *obj = gc_mark_stack[--gc_mark_sp];
+while (js->gc.mark_sp > 0) {
+  ant_object_t *obj = js->gc.mark_stack[--js->gc.mark_sp];
   gc_scan_obj(js, obj);
 }}
 
@@ -631,14 +618,14 @@ static bool gc_weak_key_alive(ant_t *js, ant_value_t key) {
     sv_closure_t *closure = js_func_closure(key);
     if (!closure || !fixed_arena_contains(&js->closure_arena, closure))
       return false;
-    return (g_minor_gc && closure->generation == 1) ||
-      closure->gc_epoch == gc_epoch;
+    return (js->gc.minor && closure->generation == 1) ||
+      closure->gc_epoch == js->gc.epoch;
   }
   
   if (type == kTypeSymbol) {
-    if (g_minor_gc) return true;
+    if (js->gc.minor) return true;
     return js_symbol_gc_is_permanent(key) ||
-      js_symbol_gc_is_marked(key, gc_epoch);
+      js_symbol_gc_is_marked(key, js->gc.epoch);
   }
   
   if (((1u << type) & GC_OBJ_TYPE_MASK) == 0) return false;
@@ -646,18 +633,18 @@ static bool gc_weak_key_alive(ant_t *js, ant_value_t key) {
   if (!obj || !fixed_arena_contains(&js->obj_arena, obj) ||
       obj->mark_epoch == ANT_GC_DEAD) return false;
   
-  return (g_minor_gc && obj->flags.generation == 1) ||
-    obj->mark_epoch == gc_obj_epoch || obj->flags.gc_permanent;
+  return (js->gc.minor && obj->flags.generation == 1) ||
+    obj->mark_epoch == js->gc.obj_epoch || obj->flags.gc_permanent;
 }
 
 bool gc_upvalue_is_live(ant_t *js, const sv_upvalue_t *uv) {
   if (!js->gc_running) return true;
-  return g_minor_gc ? uv->gc_epoch != 0 : uv->gc_epoch == gc_epoch;
+  return js->gc.minor ? uv->gc_epoch != 0 : uv->gc_epoch == js->gc.epoch;
 }
 
-static bool gc_weak_collection_live(const ant_object_t *obj) {
-  return obj && ((g_minor_gc && obj->flags.generation == 1) ||
-    obj->mark_epoch == gc_obj_epoch || obj->flags.gc_permanent);
+static bool gc_weak_collection_live(ant_t *js, const ant_object_t *obj) {
+  return obj && ((js->gc.minor && obj->flags.generation == 1) ||
+    obj->mark_epoch == js->gc.obj_epoch || obj->flags.gc_permanent);
 }
 
 static ant_value_t gc_weak_key_from_marked_object(ant_object_t *obj) {
@@ -669,8 +656,8 @@ switch (obj->type_tag) {
 }}
 
 static void gc_drain_mark_stack_weak(ant_t *js) {
-while (gc_mark_sp > 0) {
-  ant_object_t *obj = gc_mark_stack[--gc_mark_sp];
+while (js->gc.mark_sp > 0) {
+  ant_object_t *obj = js->gc.mark_stack[--js->gc.mark_sp];
   gc_weak_key_marked(js, gc_weak_key_from_marked_object(obj));
   gc_weak_collection_marked(js, obj);
   gc_scan_obj(js, obj);
@@ -702,7 +689,7 @@ static void gc_scan_frame_span(
   }
 
   for (sv_upvalue_t *uv = open_upvalues; uv; uv = uv->next) {
-    uv->gc_epoch = gc_epoch;
+    uv->gc_epoch = js->gc.epoch;
     if (uv->location == &uv->closed) gc_mark_value(js, uv->closed);
   }
 
@@ -712,7 +699,7 @@ static void gc_scan_frame_span(
   for (int j = 0; j < frame->upvalue_count; j++) {
     sv_upvalue_t *uv = frame->upvalues[j];
     if (!uv) continue;
-    uv->gc_epoch = gc_epoch;
+    uv->gc_epoch = js->gc.epoch;
     if (uv->location == &uv->closed) gc_mark_value(js, uv->closed);
   }}
 }
@@ -743,7 +730,7 @@ static void gc_scan_range(ant_t *js, uintptr_t lo, uintptr_t hi) {
     memcpy(&w, (void *)addr, sizeof(w));
     
     ant_object_t *raw_obj = (ant_object_t *)(uintptr_t)w;
-    if (fixed_arena_contains(&js->obj_arena, raw_obj)) gc_grey_obj(raw_obj);
+    if (fixed_arena_contains(&js->obj_arena, raw_obj)) gc_grey_obj(js, raw_obj);
       
     sv_closure_t *raw_closure = (sv_closure_t *)(uintptr_t)w;
     if (fixed_arena_contains(&js->closure_arena, raw_closure)) gc_mark_closure(js, raw_closure);
@@ -752,8 +739,8 @@ static void gc_scan_range(ant_t *js, uintptr_t lo, uintptr_t hi) {
     if (fixed_arena_contains(&js->upvalue_arena, raw_uv)) {
       size_t uv_budget = js->upvalue_arena.watermark / js->upvalue_arena.elem_size + 1;
       do {
-        if (raw_uv->gc_epoch != gc_epoch) {
-          raw_uv->gc_epoch = gc_epoch;
+        if (raw_uv->gc_epoch != js->gc.epoch) {
+          raw_uv->gc_epoch = js->gc.epoch;
           if (raw_uv->location == &raw_uv->closed) gc_mark_value(js, raw_uv->closed);
         }
         raw_uv = raw_uv->next;
@@ -765,7 +752,7 @@ static void gc_scan_range(ant_t *js, uintptr_t lo, uintptr_t hi) {
     
     if ((1u << type) & GC_OBJ_TYPE_MASK) {
       ant_object_t *obj = (ant_object_t *)vptr(w);
-      if (fixed_arena_contains(&js->obj_arena, obj)) gc_grey_obj(obj);
+      if (fixed_arena_contains(&js->obj_arena, obj)) gc_grey_obj(js, obj);
     }
     
     if (type == kTypeFunction) {
@@ -902,8 +889,8 @@ static void gc_scan_other_stacks(ant_t *js) {
 }
 
 void gc_mark_coroutine(ant_t *js, coroutine_t *c) {
-  if (!c || c->gc_epoch == gc_epoch) return;
-  c->gc_epoch = gc_epoch;
+  if (!c || c->gc_epoch == js->gc.epoch) return;
+  c->gc_epoch = js->gc.epoch;
   
   gc_scan_activation(js, c->act);
   gc_mark_value(js, c->this_val);
@@ -993,9 +980,9 @@ static inline void gc_mark_promise_handlers(ant_t *js, ant_promise_state_t *pd) 
 }
 
 static void gc_mark_permanent_roots(ant_t *js) {
-  size_t start = g_minor_gc ? js->permanent_root_traced : 0;
+  size_t start = js->gc.minor ? js->permanent_root_traced : 0;
   for (size_t i = start; i < js->permanent_root_len; i++)
-    gc_grey_obj(js->permanent_roots[i]);
+    gc_grey_obj(js, js->permanent_roots[i]);
 }
 
 static void gc_mark_roots(ant_t *js) {
@@ -1086,14 +1073,14 @@ static void gc_mark_roots(ant_t *js) {
   for (ant_object_t *obj = js->pending_promises; obj;) {
     ant_promise_state_t *pd = obj->promise_state;
     ant_object_t *next = pd ? pd->gc_pending_next : NULL;
-    gc_grey_obj(obj);
+    gc_grey_obj(js, obj);
     obj = next;
   }
 
   gc_scan_current_stack(js);
   gc_scan_other_stacks(js);
 
-  if (!g_minor_gc) {
+  if (!js->gc.minor) {
     for (ant_object_t *obj = js->permanent_objects; obj; obj = obj->next) 
       gc_scan_obj(js, obj);
   }
@@ -1236,7 +1223,7 @@ static void gc_sweep_young_and_promote(ant_t *js) {
   while (obj) {
     ant_object_t *next = obj->next;
     if (next) __builtin_prefetch(next);
-    if (obj->mark_epoch == gc_obj_epoch) {
+    if (obj->mark_epoch == js->gc.obj_epoch) {
       obj->flags.generation = 1;
       obj->next = js->objects_old;
       js->objects_old = obj;
@@ -1262,7 +1249,7 @@ static void gc_sweep(ant_t *js) {
       continue;
     }
 
-    if (obj->flags.gc_permanent || obj->mark_epoch == gc_obj_epoch) {
+    if (obj->flags.gc_permanent || obj->mark_epoch == js->gc.obj_epoch) {
       if (!new_wm) new_wm = off;
       if (obj->flags.gc_permanent) continue;
       obj->flags.generation = 1;
@@ -1288,7 +1275,7 @@ void gc_pin_existing_objects(ant_t *js) {
   if (!js) return;
 
   ant_fixed_arena_t *ua = &js->upvalue_arena;
-  uint64_t stamp = gc_epoch ? gc_epoch : ~0ull;
+  uint64_t stamp = js->gc.epoch ? js->gc.epoch : ~0ull;
   
   for (size_t off = 0; off < ua->watermark; off += ua->elem_size) {
     sv_upvalue_t *uv = (sv_upvalue_t *)(ua->base + off);
@@ -1336,14 +1323,14 @@ uint64_t gc_objects_run(ant_t *js, gc_extra_roots_fn extra_roots) {
   uint64_t mark_start_ns = gc_now_ns();
   
   js->gc_objects_running = true;
-  if (g_gc_func_mark_profile.enabled) g_gc_func_mark_profile.collections++;
+  if (js->gc.func_profile.enabled) js->gc.func_profile.collections++;
   
-  gc_epoch++;
-  if (gc_epoch == 0) gc_epoch = 1;
+  js->gc.epoch++;
+  if (js->gc.epoch == 0) js->gc.epoch = 1;
 
-  gc_obj_epoch = (uint8_t)(gc_obj_epoch + 1u);
-  if (gc_obj_epoch == 0 || gc_obj_epoch == ANT_GC_DEAD) {
-    gc_obj_epoch = 1;
+  js->gc.obj_epoch = (uint8_t)(js->gc.obj_epoch + 1u);
+  if (js->gc.obj_epoch == 0 || js->gc.obj_epoch == ANT_GC_DEAD) {
+    js->gc.obj_epoch = 1;
     gc_obj_epoch_wrapped(js);
   }
 
@@ -1387,7 +1374,7 @@ uint64_t gc_objects_run(ant_t *js, gc_extra_roots_fn extra_roots) {
   for (size_t off = 0; off < ca->watermark; off += ca->elem_size) {
     sv_closure_t *c = (sv_closure_t *)(ca->base + off);
     
-  if (c->gc_epoch == gc_epoch) {
+  if (c->gc_epoch == js->gc.epoch) {
     c->generation = 1;
     ca->live_count++;
   } else {
@@ -1405,7 +1392,7 @@ uint64_t gc_objects_run(ant_t *js, gc_extra_roots_fn extra_roots) {
     uint64_t epoch;
     memcpy(&epoch, slot + ua->epoch_offset, sizeof(epoch));
     
-    if (epoch == gc_epoch) ua->live_count++;
+    if (epoch == js->gc.epoch) ua->live_count++;
     else {
       *(void **)slot = ua->free_list;
       ua->free_list = slot;
@@ -1416,12 +1403,12 @@ uint64_t gc_objects_run(ant_t *js, gc_extra_roots_fn extra_roots) {
   js->young_upvalue_len = 0;
   js->young_closure_trigger = GC_CLOSURE_NURSERY_THRESHOLD;
 
-  if (gc_mark_cap > GC_MARK_STACK_INIT) {
+  if (js->gc.mark_cap > GC_MARK_STACK_INIT) {
     size_t target = js->obj_arena.live_count * 2;
     if (target < GC_MARK_STACK_INIT) target = GC_MARK_STACK_INIT;
-    if (target < gc_mark_cap / 2) {
-      ant_object_t **ns = realloc(gc_mark_stack, target * sizeof(*ns));
-      if (ns) { gc_mark_stack = ns; gc_mark_cap = target; }
+    if (target < js->gc.mark_cap / 2) {
+      ant_object_t **ns = realloc(js->gc.mark_stack, target * sizeof(*ns));
+      if (ns) { js->gc.mark_stack = ns; js->gc.mark_cap = target; }
     }
   }
 
@@ -1439,17 +1426,17 @@ void gc_objects_run_minor(ant_t *js) {
   if (!js) return;
   
   js->gc_objects_running = true;
-  gc_epoch++;
+  js->gc.epoch++;
 
-  if (gc_epoch == 0) gc_epoch = 1;
-  gc_obj_epoch = (uint8_t)(gc_obj_epoch + 1u);
+  if (js->gc.epoch == 0) js->gc.epoch = 1;
+  js->gc.obj_epoch = (uint8_t)(js->gc.obj_epoch + 1u);
 
-  if (gc_obj_epoch == 0 || gc_obj_epoch == ANT_GC_DEAD) {
-    gc_obj_epoch = 1;
+  if (js->gc.obj_epoch == 0 || js->gc.obj_epoch == ANT_GC_DEAD) {
+    js->gc.obj_epoch = 1;
     gc_obj_epoch_wrapped(js);
   }
   
-  g_minor_gc = true;
+  js->gc.minor = true;
   GC_VERIFY_CARDS(js);
 
   for (size_t i = 0; i < js->remember_set_len; i++)
@@ -1472,7 +1459,7 @@ void gc_objects_run_minor(ant_t *js) {
   );
   
   gc_clear_napi_weak_refs(js, true);
-  g_minor_gc = false;
+  js->gc.minor = false;
 
   gc_age_regex_cache(js, true);
   gc_sweep_young_and_promote(js);
@@ -1488,6 +1475,6 @@ void gc_objects_run_minor(ant_t *js) {
   js->gc_objects_running = false;
 }
 
-uint64_t gc_get_epoch(void) { 
-  return gc_epoch;
+uint64_t gc_get_epoch(ant_t *js) { 
+  return js->gc.epoch;
 }

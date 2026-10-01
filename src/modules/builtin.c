@@ -110,7 +110,7 @@ static ant_value_t js_raw_ctor_prop_feedback(ant_params_t) {
 }
 
 static ant_value_t js_raw_gc_mark_profile(ant_params_t) {
-  gc_func_mark_profile_t p = gc_func_mark_profile_get();
+  gc_func_mark_profile_t p = gc_func_mark_profile_get(js);
   ant_value_t out = js_newobj(js);
   
   js_set(js, out, "enabled", js_bool(p.enabled));
@@ -127,12 +127,12 @@ static ant_value_t js_raw_gc_mark_profile(ant_params_t) {
 static ant_value_t js_raw_gc_mark_profile_enable(ant_params_t) {
   bool enabled = true;
   if (nargs > 0) enabled = js_truthy(js, args[0]);
-  gc_func_mark_profile_enable(enabled);
+  gc_func_mark_profile_enable(js, enabled);
   return js_bool(enabled);
 }
 
 static ant_value_t js_raw_gc_mark_profile_reset(ant_params_t) {
-  gc_func_mark_profile_reset();
+  gc_func_mark_profile_reset(js);
   return js_mkundef();
 }
 

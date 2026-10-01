@@ -228,6 +228,30 @@ struct ant_isolate_t {
     size_t array_limit;
     size_t array_major_limit;
     size_t idle_retry_at;
+
+    size_t tick;
+    size_t nursery_threshold;
+    uint32_t major_every_n;
+    uint32_t major_live_growth_x256;
+    uint32_t major_pool_growth_x256;
+    uint32_t minor_surv_ewma;
+    uint32_t major_recl_ewma;
+    uint32_t major_time_share_ewma;
+    uint32_t major_work_share_ewma;
+    uint64_t last_major_end_ns;
+    uint64_t minor_cost_ns;
+    uint64_t major_cost_ns;
+
+    uint64_t epoch;
+    uint8_t obj_epoch;
+    bool minor;
+    ant_object_t **mark_stack;
+    size_t mark_sp;
+    size_t mark_cap;
+
+    gc_func_mark_profile_t func_profile;
+    uint32_t func_profile_depth;
+    uint64_t func_profile_start_ns;
   } gc;
 
   ant_object_t *objects_old;

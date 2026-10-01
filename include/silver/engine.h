@@ -794,10 +794,8 @@ static inline void js_closure_alloc_prepare(ant_t *js) {
   if (js->young_closure_len >= js->young_closure_trigger) gc_pressure(js);
 }
 
-static inline sv_closure_t *js_closure_alloc_finish(
-  ant_t *js, sv_closure_t *c
-) {
-  c->gc_epoch = gc_get_epoch();
+static inline sv_closure_t *js_closure_alloc_finish(ant_t *js, sv_closure_t *c) {
+  c->gc_epoch = gc_get_epoch(js);
   c->js = js;
   c->func_obj = 0;
   c->module_ctx = mkval(kTypeUndefined, 0);

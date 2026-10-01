@@ -12,6 +12,22 @@
 static constexpr uint8_t ANT_GC_DEAD = 0xFF;
 typedef void (*gc_extra_roots_fn)(ant_t *js);
 
+typedef struct gc_vm_seg {
+  struct gc_vm_seg *prev;
+  uintptr_t lo, hi;
+  uintptr_t fp;
+  uint32_t jit_depth;
+} gc_vm_seg_t;
+
+typedef struct gc_func_mark_profile {
+  bool enabled;
+  uint64_t collections;
+  uint64_t func_visits;
+  uint64_t child_edges;
+  uint64_t const_slots;
+  uint64_t time_ns;
+} gc_func_mark_profile_t;
+
 static inline uint64_t gc_now_ns(void) {
 #ifdef ANT_WASM_EMBED
   return (uint64_t)(ant_wasm_now_ms() * 1000000.0);
@@ -21,13 +37,6 @@ static inline uint64_t gc_now_ns(void) {
   return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 #endif
 }
-
-typedef struct gc_vm_seg {
-  struct gc_vm_seg *prev;
-  uintptr_t lo, hi;
-  uintptr_t fp;
-  uint32_t jit_depth;
-} gc_vm_seg_t;
 
 #if defined(__aarch64__)
 #define GC_VM_SEG_SAVED_REGS_BYTES 144u
@@ -75,9 +84,7 @@ static inline __attribute__((always_inline)) uintptr_t gc_native_sp(void) {
   return sp;
 }
 
-bool gc_obj_is_marked(const ant_object_t *obj);
-
-uint64_t gc_get_epoch(void);
+uint64_t gc_get_epoch(ant_t *js);
 uint64_t gc_objects_run(ant_t *js, gc_extra_roots_fn extra_roots);
 
 void gc_mark_str(ant_t *js, ant_value_t v);
@@ -93,5 +100,7 @@ void gc_pin_existing_objects(ant_t *js);
 
 void gc_root_pending_promise(ant_t *js, ant_object_t *obj);
 void gc_unroot_pending_promise(ant_t *js, ant_object_t *obj);
+
+bool gc_obj_is_marked(ant_t *js, const ant_object_t *obj);
 
 #endif

@@ -11963,7 +11963,7 @@ static ant_value_t builtin_array_shift(ant_params_t) {
     ant_value_t first = dense_get(doff, 0);
     if (is_empty_slot(first)) first = js_mkundef();
     memmove(&d[0], &d[1], sizeof(ant_value_t) * (size_t)(d_len - 1));
-    gc_elements_moved(js, dense_obj(doff));
+    gc_elements_moved(dense_obj(doff));
     dense_set(js, doff, d_len - 1, T_EMPTY);
     array_len_set(js, arr, len - 1);
     return first;
@@ -12037,7 +12037,7 @@ static ant_value_t builtin_array_unshift(ant_params_t) {
     ant_value_t *d = dense_data(doff);
     if (!d) return js_mkerr(js, "oom");
     memmove(&d[nargs], &d[0], sizeof(ant_value_t) * (size_t)d_len);
-    gc_elements_moved(js, dense_obj(doff));
+    gc_elements_moved(dense_obj(doff));
     for (int i = 0; i < nargs; i++)
       dense_set(js, doff, (ant_offset_t)i, args[i]);
     array_len_set(js, arr, new_len);
@@ -12298,7 +12298,7 @@ static ant_value_t builtin_array_splice(ant_params_t) {
       if (!d) return js_mkerr(js, "oom");
       if (move_count > 0) {
         memmove(&d[move_dest], &d[move_start], sizeof(ant_value_t) * (size_t)move_count);
-        gc_elements_moved(js, dense_obj(doff));
+        gc_elements_moved(dense_obj(doff));
       }
     }
 
@@ -18944,6 +18944,7 @@ static ant_t *isolate_init(void *buf, size_t len) {
   js->rope_gc.young.block_size = ANT_POOL_ROPE_BLOCK_SIZE;
   js->rope_gc.old.block_size = ANT_POOL_ROPE_BLOCK_SIZE;
   js->gc_use_nursery_major_floor = true;
+  gc_state_init(js);
 
   if (!isolate_arenas_init(js)) return NULL;
 
@@ -19518,6 +19519,7 @@ void js_destroy(ant_t *js) {
   sv_jit_destroy(js);
   sv_ic_shape_refs_cleanup(js);
   free(js->ic.gf_mega);
+  free(js->gc.mark_stack);
   js->ic.gf_mega = NULL;
   code_arena_reset();
   cleanup_rpc_module();

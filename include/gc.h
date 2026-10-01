@@ -28,25 +28,16 @@ static constexpr size_t GC_ARRAY_GROWTH_FLOOR = 16u * 1024u * 1024u;
   | T_FLAG_FIND(kTypePromise)                      \
   | T_FLAG_FIND(kTypeGenerator))
 
-typedef struct gc_func_mark_profile {
-  bool enabled;
-  uint64_t collections;
-  uint64_t func_visits;
-  uint64_t child_edges;
-  uint64_t const_slots;
-  uint64_t time_ns;
-} gc_func_mark_profile_t;
-
+void gc_state_init(ant_t *js);
 void gc_run(ant_t *js);
 void gc_run_minor(ant_t *js);
 void gc_maybe(ant_t *js);
-bool gc_alloc_due(ant_t *js);
 void gc_refresh_alloc_limit(ant_t *js);
 void gc_array_grew(ant_t *js);
-// the major trigger for array storage, from the heap as it is now
 void gc_array_limits_init(ant_t *js);
 void gc_alloc_check(ant_t *js);
 void gc_pressure(ant_t *js);
+bool gc_alloc_due(ant_t *js);
 bool gc_idle_wanted(ant_t *js);
 size_t gc_alloc_marker(ant_t *js);
 void gc_idle(ant_t *js, int64_t budget_ms);
@@ -65,11 +56,11 @@ void gc_track_young_upvalue_slow(ant_t *js, struct sv_upvalue *uv);
 size_t gc_live_major_threshold(ant_t *js);
 size_t gc_pool_major_threshold(ant_t *js);
 
-void gc_func_mark_profile_enable(bool enabled);
-void gc_func_mark_profile_reset(void);
+void gc_func_mark_profile_enable(ant_t *js, bool enabled);
+void gc_func_mark_profile_reset(ant_t *js);
 
 extern bool gc_disabled;
-gc_func_mark_profile_t gc_func_mark_profile_get(void);
+gc_func_mark_profile_t gc_func_mark_profile_get(ant_t *js);
 
 static inline bool gc_value_is_heap_ref(ant_value_t v) {
   if (!is_tagged(v)) return false;
@@ -94,17 +85,11 @@ static inline void gc_write_barrier(ant_t *js, ant_object_t *writer_obj, ant_val
   if (gc_value_is_heap_ref(new_val) && gc_value_ref_is_young(new_val)) gc_remember_add(js, writer_obj);
 }
 
-// For a store into a named property slot (ant_object_prop_set_unchecked): a
-// minor rescans every named slot of a remembered object, so an array's card
-// table, which covers only its dense storage, stays as it is.
 static inline void gc_write_barrier_prop(ant_t *js, ant_object_t *writer_obj, ant_value_t new_val) {
   if (writer_obj->flags.generation != 1) return;
   if (gc_value_is_heap_ref(new_val) && gc_value_ref_is_young(new_val)) gc_remember_props(js, writer_obj);
 }
 
-// For a store into an array's dense storage at idx: records the slot's card,
-// so a minor rescans that range rather than the whole array (see
-// gc_card_table_t).
 static inline void gc_write_barrier_elem(ant_t *js, ant_object_t *arr, uint32_t idx, ant_value_t new_val) {
   if (arr->flags.generation != 1) return;
   if (!gc_value_is_heap_ref(new_val) || !gc_value_ref_is_young(new_val)) return;
@@ -114,11 +99,7 @@ static inline void gc_write_barrier_elem(ant_t *js, ant_object_t *arr, uint32_t 
   gc_remember_element(js, arr, idx);
 }
 
-// After moving elements within an array (shift, splice, queue shifts): any
-// young reference it holds may now sit in a different card. An array that
-// isn't remembered holds none.
-static inline void gc_elements_moved(ant_t *js, ant_object_t *arr) {
-  (void)js;
+static inline void gc_elements_moved(ant_object_t *arr) {
   if (arr->flags.in_remember_set) gc_cards_mark_all(arr);
 }
 

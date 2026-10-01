@@ -479,6 +479,15 @@ gc_array_cards_test = executable(
 )
 test('gc-array-cards', gc_array_cards_test)
 
+gc_two_isolates_test = executable(
+  'test-gc-two-isolates',
+  files('tests/test_gc_two_isolates.c'),
+  dependencies: libant_dep,
+  c_args: ['-UNDEBUG'],
+  build_by_default: false
+)
+test('gc-two-isolates', gc_two_isolates_test)
+
 ic_identity_wrap_test = executable(
   'test-ic-identity-wrap',
   files('tests/test_ic_identity_wrap.c'),

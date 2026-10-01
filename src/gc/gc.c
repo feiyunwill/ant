@@ -16,19 +16,15 @@
 #endif
 
 bool gc_disabled = false;
-static size_t gc_tick = 0;
 
-static size_t   gc_nursery_threshold = GC_NURSERY_THRESHOLD;
-static uint32_t gc_major_every_n     = GC_MAJOR_EVERY_N_MINOR;
-
-static uint32_t gc_major_live_growth_x256 = 384;
-static uint32_t gc_major_pool_growth_x256 = 384;
-
-static uint32_t gc_minor_surv_ewma = 128;
-static uint32_t gc_major_recl_ewma =  26;
-
-static uint32_t gc_major_time_share_ewma = 0;
-static uint32_t gc_major_work_share_ewma = 0;
+void gc_state_init(ant_t *js) {
+  js->gc.nursery_threshold = GC_NURSERY_THRESHOLD;
+  js->gc.major_every_n = GC_MAJOR_EVERY_N_MINOR;
+  js->gc.major_live_growth_x256 = 384;
+  js->gc.major_pool_growth_x256 = 384;
+  js->gc.minor_surv_ewma = 128;
+  js->gc.major_recl_ewma = 26;
+}
 
 static size_t gc_young_alloc_bytes(ant_t *js) {
   size_t live = js->obj_arena.live_count;
@@ -40,10 +36,6 @@ static size_t gc_young_alloc_bytes(ant_t *js) {
     
   return young * js->obj_arena.elem_size + arrays;
 }
-
-static uint64_t gc_last_major_end_ns = 0;
-static uint64_t gc_minor_cost_ns = 0;
-static uint64_t gc_major_cost_ns = 0;
 
 static size_t gc_scaled_threshold(size_t base_live, uint32_t growth_x256, size_t floor) {
   size_t scaled = (base_live * (size_t)growth_x256) / 256u;
@@ -74,37 +66,37 @@ size_t gc_live_major_threshold(ant_t *js) {
   // right after a promotion reclaims nothing and only inflates the growth
   // factor. The floor is therefore in units of promotions, not a constant.
   size_t threshold = gc_scaled_threshold(
-    js->gc.last_live, gc_major_live_growth_x256,
-    js->gc.last_live + GC_MAJOR_MIN_PROMOTIONS * gc_nursery_threshold
+    js->gc.last_live, js->gc.major_live_growth_x256,
+    js->gc.last_live + GC_MAJOR_MIN_PROMOTIONS * js->gc.nursery_threshold
   );
 
-  bool nursery_churn = gc_minor_surv_ewma <= 64;   // <= 25% young survival
-  bool nursery_sticky = gc_minor_surv_ewma >= 160; // >= 62.5% young survival
-  bool major_pays = gc_major_recl_ewma >= 51;      // >= 20% old-gen reclaim
-  bool major_wasteful = gc_major_recl_ewma <= 13;  // <= 5% old-gen reclaim
+  bool nursery_churn = js->gc.minor_surv_ewma <= 64;   // <= 25% young survival
+  bool nursery_sticky = js->gc.minor_surv_ewma >= 160; // >= 62.5% young survival
+  bool major_pays = js->gc.major_recl_ewma >= 51;      // >= 20% old-gen reclaim
+  bool major_wasteful = js->gc.major_recl_ewma <= 13;  // <= 5% old-gen reclaim
 
   if (js->gc_use_nursery_major_floor) {
     if (nursery_sticky || (major_pays && !nursery_churn)) js->gc_use_nursery_major_floor = false;
   } else if (nursery_churn || major_wasteful) js->gc_use_nursery_major_floor = true;
 
   if (!js->gc_use_nursery_major_floor) return threshold;
-  size_t nursery_floor = js->old_live_count + gc_nursery_threshold;
+  size_t nursery_floor = js->old_live_count + js->gc.nursery_threshold;
   
   return threshold < nursery_floor ? nursery_floor : threshold;
 }
 
 size_t gc_pool_major_threshold(ant_t *js) {
-  return gc_scaled_threshold(js->gc.pool_last_live, gc_major_pool_growth_x256, GC_POOL_PRESSURE_FLOOR);
+  return gc_scaled_threshold(js->gc.pool_last_live, js->gc.major_pool_growth_x256, GC_POOL_PRESSURE_FLOOR);
 }
 
-static void gc_adapt_nursery(size_t young_before, size_t survivors) {
+static void gc_adapt_nursery(ant_t *js, size_t young_before, size_t survivors) {
   if (young_before == 0) return;
   uint32_t rate = (uint32_t)((survivors * 256) / young_before);
-  gc_minor_surv_ewma = (gc_minor_surv_ewma * 3 + rate) >> 2;
-  if (gc_minor_surv_ewma < 64 && gc_nursery_threshold > GC_NURSERY_THRESHOLD / 2)
-    gc_nursery_threshold -= gc_nursery_threshold / 4;
-  else if (gc_nursery_threshold < GC_NURSERY_THRESHOLD)
-    gc_nursery_threshold = GC_NURSERY_THRESHOLD;
+  js->gc.minor_surv_ewma = (js->gc.minor_surv_ewma * 3 + rate) >> 2;
+  if (js->gc.minor_surv_ewma < 64 && js->gc.nursery_threshold > GC_NURSERY_THRESHOLD / 2)
+    js->gc.nursery_threshold -= js->gc.nursery_threshold / 4;
+  else if (js->gc.nursery_threshold < GC_NURSERY_THRESHOLD)
+    js->gc.nursery_threshold = GC_NURSERY_THRESHOLD;
 }
 
 static size_t gc_array_growth(size_t base) {
@@ -122,18 +114,18 @@ static void gc_adapt_major_interval(
   ant_t *js, size_t bytes_before, size_t bytes_after, 
   uint64_t mark_ns, uint64_t end_ns
 ) {
-  if (gc_last_major_end_ns != 0 && end_ns > gc_last_major_end_ns) {
-    uint64_t interval_ns = end_ns - gc_last_major_end_ns;
+  if (js->gc.last_major_end_ns != 0 && end_ns > js->gc.last_major_end_ns) {
+    uint64_t interval_ns = end_ns - js->gc.last_major_end_ns;
     uint32_t share = (uint32_t)((mark_ns * 1024) / interval_ns);
-    gc_major_time_share_ewma = (gc_major_time_share_ewma * 3 + share) >> 2;
+    js->gc.major_time_share_ewma = (js->gc.major_time_share_ewma * 3 + share) >> 2;
   }
   
-  gc_last_major_end_ns = end_ns;
+  js->gc.last_major_end_ns = end_ns;
 
   if (js->gc.alloc_since_major > 0) {
     uint64_t work = (uint64_t)bytes_after * 1024u / js->gc.alloc_since_major;
     uint32_t share = work > UINT16_MAX ? UINT16_MAX : (uint32_t)work;
-    gc_major_work_share_ewma = (gc_major_work_share_ewma * 3 + share) >> 2;
+    js->gc.major_work_share_ewma = (js->gc.major_work_share_ewma * 3 + share) >> 2;
   }
   
   js->gc.alloc_since_major = 0;
@@ -141,43 +133,43 @@ static void gc_adapt_major_interval(
   
   size_t freed = bytes_before > bytes_after ? bytes_before - bytes_after : 0;
   uint32_t rate = (uint32_t)((freed * 256) / bytes_before);
-  gc_major_recl_ewma = (gc_major_recl_ewma * 3 + rate) >> 2;
+  js->gc.major_recl_ewma = (js->gc.major_recl_ewma * 3 + rate) >> 2;
 
-  bool gen_ineffect = gc_minor_surv_ewma  > 192; // >75% nursery survival
-  bool high_reclaim = gc_major_recl_ewma  >  51; // >20% old-gen freed
-  bool low_reclaim  = gc_major_recl_ewma  <  13; // < 5% old-gen freed
+  bool gen_ineffect = js->gc.minor_surv_ewma  > 192; // >75% nursery survival
+  bool high_reclaim = js->gc.major_recl_ewma  >  51; // >20% old-gen freed
+  bool low_reclaim  = js->gc.major_recl_ewma  <  13; // < 5% old-gen freed
   
-  bool majors_costly = gc_major_time_share_ewma > GC_MAJOR_TIME_SHARE_HIGH 
-    && gc_major_work_share_ewma > GC_MAJOR_WORK_SHARE_HIGH;
-  bool majors_cheap  = gc_major_time_share_ewma < GC_MAJOR_TIME_SHARE_LOW;
+  bool majors_costly = js->gc.major_time_share_ewma > GC_MAJOR_TIME_SHARE_HIGH 
+    && js->gc.major_work_share_ewma > GC_MAJOR_WORK_SHARE_HIGH;
+  bool majors_cheap  = js->gc.major_time_share_ewma < GC_MAJOR_TIME_SHARE_LOW;
 
   if (majors_costly) {
-    if (gc_major_every_n < GC_MAJOR_EVERY_N_MINOR * 4) gc_major_every_n++;
-    if (gc_major_live_growth_x256 < 1024) gc_major_live_growth_x256 += 64;
-    if (gc_major_pool_growth_x256 < 1536) gc_major_pool_growth_x256 += 64;
+    if (js->gc.major_every_n < GC_MAJOR_EVERY_N_MINOR * 4) js->gc.major_every_n++;
+    if (js->gc.major_live_growth_x256 < 1024) js->gc.major_live_growth_x256 += 64;
+    if (js->gc.major_pool_growth_x256 < 1536) js->gc.major_pool_growth_x256 += 64;
     return;
   }
 
   if ((gen_ineffect && !low_reclaim) || (high_reclaim && majors_cheap)) {
-    if (gc_major_every_n > 2) gc_major_every_n--;
+    if (js->gc.major_every_n > 2) js->gc.major_every_n--;
   } else if (!gen_ineffect && low_reclaim) {
-    if (gc_major_every_n < GC_MAJOR_EVERY_N_MINOR * 4) gc_major_every_n++;
+    if (js->gc.major_every_n < GC_MAJOR_EVERY_N_MINOR * 4) js->gc.major_every_n++;
   }
 
   if (gen_ineffect && low_reclaim) {
-    if (gc_major_live_growth_x256 < 1024) gc_major_live_growth_x256 += 96;
-    if (gc_major_pool_growth_x256 < 1536) gc_major_pool_growth_x256 += 128;
+    if (js->gc.major_live_growth_x256 < 1024) js->gc.major_live_growth_x256 += 96;
+    if (js->gc.major_pool_growth_x256 < 1536) js->gc.major_pool_growth_x256 += 128;
   } else if (low_reclaim) {
-    if (gc_major_live_growth_x256 < 896) gc_major_live_growth_x256 += 48;
-    if (gc_major_pool_growth_x256 < 1280) gc_major_pool_growth_x256 += 64;
+    if (js->gc.major_live_growth_x256 < 896) js->gc.major_live_growth_x256 += 48;
+    if (js->gc.major_pool_growth_x256 < 1280) js->gc.major_pool_growth_x256 += 64;
   } else if (high_reclaim && majors_cheap) {
-    if (gc_major_live_growth_x256 > 320) gc_major_live_growth_x256 -= 32;
-    if (gc_major_pool_growth_x256 > 320) gc_major_pool_growth_x256 -= 32;
+    if (js->gc.major_live_growth_x256 > 320) js->gc.major_live_growth_x256 -= 32;
+    if (js->gc.major_pool_growth_x256 > 320) js->gc.major_pool_growth_x256 -= 32;
   } else {
-    if (gc_major_live_growth_x256 > 384) gc_major_live_growth_x256 -= 16;
-    else if (gc_major_live_growth_x256 < 384) gc_major_live_growth_x256 += 16;
-    if (gc_major_pool_growth_x256 > 384) gc_major_pool_growth_x256 -= 16;
-    else if (gc_major_pool_growth_x256 < 384) gc_major_pool_growth_x256 += 16;
+    if (js->gc.major_live_growth_x256 > 384) js->gc.major_live_growth_x256 -= 16;
+    else if (js->gc.major_live_growth_x256 < 384) js->gc.major_live_growth_x256 += 16;
+    if (js->gc.major_pool_growth_x256 > 384) js->gc.major_pool_growth_x256 -= 16;
+    else if (js->gc.major_pool_growth_x256 < 384) js->gc.major_pool_growth_x256 += 16;
   }
 }
 
@@ -329,7 +321,7 @@ void gc_run(ant_t *js) {
   js->gc.idle_retry_at = 0;
 
   uint64_t end_ns = gc_now_ns();
-  gc_major_cost_ns = end_ns - start_ns;
+  js->gc.major_cost_ns = end_ns - start_ns;
   
   gc_adapt_major_interval(
     js, bytes_before, 
@@ -376,11 +368,11 @@ void gc_run_minor(ant_t *js) {
     ? js->obj_arena.live_count - old_before : 0;
 
   js->gc.closure_at_minor = js->gc.closure_alloc;
-  gc_adapt_nursery(young_before, survivors);
+  gc_adapt_nursery(js, young_before, survivors);
   
   js->gc.arrays_at_collect = js->alloc_bytes.arrays;
   js->gc.idle_retry_at = 0;
-  gc_minor_cost_ns = gc_now_ns() - start_ns;
+  js->gc.minor_cost_ns = gc_now_ns() - start_ns;
   
   gc_refresh_alloc_limit(js);
   js->gc_running = false;
@@ -388,7 +380,7 @@ void gc_run_minor(ant_t *js) {
 
 void gc_pressure(ant_t *js) {
   if (__builtin_expect(gc_disabled, 0)) return;
-  gc_tick = GC_MIN_TICK;
+  js->gc.tick = GC_MIN_TICK;
   gc_maybe(js);
 }
 
@@ -401,19 +393,19 @@ static void gc_decide(ant_t *js) {
     js->gc.closure_alloc - js->gc.closure_at_minor : 0;
 
   if (
-    young_count >= gc_nursery_threshold                  ||
+    young_count >= js->gc.nursery_threshold                  ||
     js->rope_gc.young_alloc >= GC_ROPE_NURSERY_THRESHOLD ||
     closure_young >= GC_CLOSURE_NURSERY_THRESHOLD        ||
     js->alloc_bytes.arrays >= js->gc.array_limit
   ) {
-    gc_tick = 0;
+    js->gc.tick = 0;
     size_t live_before_minor = js->obj_arena.live_count;
     size_t major_threshold = gc_live_major_threshold(js);
     size_t pool_threshold = gc_pool_major_threshold(js);
 
     gc_run_minor(js);
 
-    if (js->minor_gc_count >= gc_major_every_n) {
+    if (js->minor_gc_count >= js->gc.major_every_n) {
       bool major_due = false;
       
       if (live_before_minor >= major_threshold) major_due = true;
@@ -433,7 +425,7 @@ static void gc_decide(ant_t *js) {
 
   size_t threshold = gc_live_major_threshold(js);
   if (live >= threshold) {
-    gc_tick = 0;
+    js->gc.tick = 0;
     
     if (young_count >= live / 4) {
       gc_run_minor(js);
@@ -445,7 +437,7 @@ static void gc_decide(ant_t *js) {
   }
 
   if (js->closure_arena.watermark - js->gc.closure_wm_at_major >= GC_CLOSURE_MAJOR_GROWTH) {
-    gc_tick = 0;
+    js->gc.tick = 0;
     
     if (js->closure_arena.watermark > js->gc.closure_wm_minor_tried) {
       js->gc.closure_wm_minor_tried = js->closure_arena.watermark;
@@ -460,12 +452,12 @@ static void gc_decide(ant_t *js) {
   // nothing is due: check again after another GC_MIN_TICK polls. Garbage
   // below every threshold is left for the idle hook (gc_idle), not collected
   // on a clock, so collections depend only on what the program allocates.
-  gc_tick = 0;
+  js->gc.tick = 0;
   gc_refresh_alloc_limit(js);
 }
 
 void gc_refresh_alloc_limit(ant_t *js) {
-  size_t nursery = js->old_live_count + gc_nursery_threshold;
+  size_t nursery = js->old_live_count + js->gc.nursery_threshold;
   size_t major = gc_live_major_threshold(js);
   js->gc.alloc_limit = nursery < major ? nursery : major;
   js->gc.array_limit = js->gc.arrays_at_collect + 
@@ -493,7 +485,7 @@ void gc_alloc_check(ant_t *js) {
 
 void gc_maybe(ant_t *js) {
   if (__builtin_expect(gc_disabled, 0)) return;
-  if (++gc_tick < GC_MIN_TICK) return;
+  if (++js->gc.tick < GC_MIN_TICK) return;
   gc_decide(js);
 }
 
@@ -517,7 +509,7 @@ static size_t gc_young_count(ant_t *js) {
 bool gc_idle_wanted(ant_t *js) {
   if (__builtin_expect(gc_disabled, 0) || js->gc_running) return false;
   if (gc_alloc_marker(js) < js->gc.idle_retry_at) return false;
-  return gc_idle_major_due(js) || gc_young_count(js) >= gc_nursery_threshold / 4;
+  return gc_idle_major_due(js) || gc_young_count(js) >= js->gc.nursery_threshold / 4;
 }
 
 static bool gc_idle_fits(uint64_t cost_ns, bool known, int64_t budget_ms) {
@@ -528,15 +520,15 @@ static bool gc_idle_fits(uint64_t cost_ns, bool known, int64_t budget_ms) {
 void gc_idle(ant_t *js, int64_t budget_ms) {
   if (!gc_idle_wanted(js)) return;
 
-  gc_tick = 0;
-  if (gc_idle_major_due(js) && gc_idle_fits(gc_major_cost_ns, gc_major_cost_ns != 0, budget_ms)) {
+  js->gc.tick = 0;
+  if (gc_idle_major_due(js) && gc_idle_fits(js->gc.major_cost_ns, js->gc.major_cost_ns != 0, budget_ms)) {
     js->minor_gc_count = 0;
     gc_run(js);
   }
   
   else if (
     gc_young_count(js) > 0 && gc_idle_fits(
-    gc_minor_cost_ns ? gc_minor_cost_ns : 2000000, true, budget_ms)
+    js->gc.minor_cost_ns ? js->gc.minor_cost_ns : 2000000, true, budget_ms)
   ) gc_run_minor(js);
   
   js->gc.idle_retry_at = gc_alloc_marker(js) + GC_NURSERY_THRESHOLD * sizeof(ant_object_t) / 8;

@@ -288,7 +288,7 @@ ant_value_t sv_jit_try_osr(
     closure->bound_this = js_mkundef();
     closure->super_val = js_mkundef();
     closure->module_ctx = js_mkundef();
-    closure->gc_epoch = gc_get_epoch();
+    closure->gc_epoch = gc_get_epoch(js);
   }
 
   sv_jit_func_t jit;
