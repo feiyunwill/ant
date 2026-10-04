@@ -188,6 +188,10 @@ typedef struct sv_compiler {
   bool allows_new_target;
   bool inherits_eval_env;
   bool owns_eval_env;
+  bool function_ctor_root;
+  
+  bool eval_shadows_undefined;
+  bool eval_shadows_global_this;
 
   sv_eval_decl_t *eval_vars;
   uint32_t eval_var_count;
@@ -254,18 +258,11 @@ typedef struct sv_compiler {
 } sv_compiler_t;
 
 
-#define SV_PARAM(name_literal) \
-  ((sv_param_t){ (name_literal), sizeof(name_literal) - 1 })
+#define SV_PARAM(name_literal) ((sv_param_t){ (name_literal), sizeof(name_literal) - 1 })
 
 sv_func_t *sv_compile(
-  ant_t *js, sv_ast_t *program,
-  sv_compile_mode_t mode,
-  const char *source, ant_offset_t source_len
-);
-
-sv_func_t *sv_compile_function(
-  ant_t *js, const char *source,
-  size_t len, bool is_async, bool is_generator
+  ant_t *js, sv_ast_t *program, sv_compile_mode_t mode,
+  const char *source, ant_offset_t source_len, ant_value_t eval_env
 );
 
 sv_func_t *sv_compile_function_with_params(
@@ -274,11 +271,8 @@ sv_func_t *sv_compile_function_with_params(
   size_t body_len, bool is_async
 );
 
-sv_func_t *compile_function_body(
-  sv_compiler_t *enclosing,
-  sv_ast_t *node,
-  sv_compile_mode_t mode
-);
+sv_func_t *sv_compile_function(ant_t *js, const sv_function_parts_t *parts);
+sv_func_t *compile_function_body(sv_compiler_t *enclosing, sv_ast_t *node, sv_compile_mode_t mode);
 
 void compile_array(sv_compiler_t *c, sv_ast_t *node);
 void compile_array_destructure(sv_compiler_t *c, sv_ast_t *pat, bool keep);

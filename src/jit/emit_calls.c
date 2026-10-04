@@ -29,6 +29,7 @@ static_assert(sizeof(((sv_ctor_prop_fb_t *)0)->inobj_frozen) == 1, "inobj_frozen
 static void jit_emit_new_direct(
     jit_compile_t *c, MIR_reg_t func, MIR_reg_t target, MIR_reg_t res,
     int argc, MIR_label_t slow, MIR_label_t done) {
+  if (c->func->code_len > JIT_NEW_DIRECT_MAX_CODE_LEN) return;
   char name[40];
   snprintf(name, sizeof(name), "nd_this_%d", c->bc_off);
   MIR_reg_t r_this = MIR_new_func_reg(c->ctx, c->jit_func->u.func, MIR_JSVAL, name);
@@ -223,7 +224,6 @@ void jit_emit_calls(jit_compile_t *c) {
           inline_callee = sv_tfb_get_call_target(c->func, c->bc_off);
         bool speculative = (inline_callee && !c->vs.known_func[c->vs.sp - call_argc - 1]);
         if (inline_callee && (!is_tail || inline_callee != c->func) && jit_inlineable(inline_callee)) {
-          sv_func_retain_for_jit(inline_callee);
           int cn = c->call_n++;
           int inl_arg_base = c->vs.sp - (int)call_argc;
           if (c->jit_try_depth > 0) {

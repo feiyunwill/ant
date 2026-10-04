@@ -234,6 +234,7 @@ struct sv_gf_mega_cache {
 
 sv_gf_mega_cache_t *sv_gf_mega_ensure(ant_t *js);
 void sv_gf_mega_clear(ant_t *js);
+void sv_ic_polys_release_shapes(ant_t *js);
 void sv_ic_identities_reset(ant_t *js);
 
 struct sv_gf_poly {
@@ -570,10 +571,6 @@ struct sv_func {
   sv_code_unit_t *unit;
   struct sv_func *unit_next;
 };
-
-static inline void sv_func_retain_for_jit(sv_func_t *func) {
-  if (func && func->unit) func->unit->immortal = true;
-}
 
 static inline const sv_map_template_desc_t *sv_map_template_desc_at(
   const sv_func_t *func, uint32_t index
