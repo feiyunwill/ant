@@ -17,6 +17,7 @@
 #include "modules/bigint.h"
 #include "modules/collections.h"
 #include "modules/symbol.h"
+#include "modules/iterator.h"
 
 static bool can_be_held_weakly(ant_value_t value) {
   if (is_object_type(value) || vtype(value) == kTypeBuiltin) return true;
@@ -429,6 +430,12 @@ map_iterator_state_t *get_map_iter_state(ant_value_t obj) {
 }
 
 set_iterator_state_t *get_set_iter_state(ant_value_t obj) {
+  if (vtype(obj) == kTypeObject) {
+    ant_object_t *ptr = (ant_object_t *)vptr(obj);
+    if (ptr && ptr->native.tag == SET_ITER_NATIVE_TAG)
+      return (set_iterator_state_t *)ptr->native.ptr;
+  }
+
   return (set_iterator_state_t *)js_get_native(obj, SET_ITER_NATIVE_TAG);
 }
 
@@ -729,7 +736,7 @@ static ant_value_t map_forEach(ant_params_t) {
   return js_mkundef();
 }
 
-bool advance_map(ant_t *js, js_iter_t *it, ant_value_t *out) {
+bool advance_map(ant_t *js, iterator_t *it, ant_value_t *out) {
   map_iterator_state_t *state = get_map_iter_state(it->iterator);
   if (!state || !state->current) return false;
 
@@ -792,7 +799,7 @@ static ant_value_t map_entries(ant_params_t) {
   return create_map_iterator(js, js->this_val, ITER_TYPE_MAP_ENTRIES);
 }
 
-bool advance_set(ant_t *js, js_iter_t *it, ant_value_t *out) {
+bool advance_set(ant_t *js, iterator_t *it, ant_value_t *out) {
   set_iterator_state_t *state = get_set_iter_state(it->iterator);
   if (!state || !state->current) return false;
 
@@ -1028,7 +1035,7 @@ static ant_value_t set_record_has(ant_t *js, set_record_t *record, ant_value_t v
 }
 
 static ant_value_t set_record_close_keys_iterator(ant_t *js, ant_value_t iterator) {
-  js_iter_t it = { .iterator = iterator };
+  iterator_t it = { .iterator = iterator };
   js_iter_close(js, &it);
   return Ant_Exception_Pending(js) ? Ant_Exception_Current(js) : js_mkundef();
 }
@@ -1678,7 +1685,7 @@ static ant_value_t map_init_from_iterable(ant_t *js, ant_value_t map_obj, map_en
   bool use_fast_path 
     = is_original_collection_adder(adder, map_set);
 
-  js_iter_t it;
+  iterator_t it;
   if (!js_iter_open(js, iterable, &it))
     return Ant_Exception_Pending(js)
       ? Ant_Exception_Current(js)
@@ -1731,7 +1738,7 @@ static ant_value_t set_init_from_iterable(ant_t *js, ant_value_t set_obj, set_en
   
   bool use_fast_path  = is_original_collection_adder(adder, set_add);
 
-  js_iter_t it;
+  iterator_t it;
   if (!js_iter_open(js, iterable, &it))
     return Ant_Exception_Pending(js)
       ? Ant_Exception_Current(js)
@@ -1772,7 +1779,7 @@ static ant_value_t weakmap_init_from_iterable(
   
   bool use_fast_path = is_original_collection_adder(adder, weakmap_set);
 
-  js_iter_t it;
+  iterator_t it;
   if (!js_iter_open(js, iterable, &it))
     return Ant_Exception_Pending(js)
       ? Ant_Exception_Current(js)
@@ -1829,7 +1836,7 @@ static ant_value_t weakset_init_from_iterable(ant_t *js, ant_value_t ws_obj, wea
   
   bool use_fast_path = is_original_collection_adder(adder, weakset_add);
 
-  js_iter_t it;
+  iterator_t it;
   if (!js_iter_open(js, iterable, &it))
     return Ant_Exception_Pending(js)
       ? Ant_Exception_Current(js)
@@ -1996,20 +2003,20 @@ static ant_value_t builtin_WeakSet(ant_params_t) {
 
 void init_collections_module(ant_t *js) {
   ant_value_t object_proto = js->sym.object_proto;  
-  ant_value_t iter_sym = get_iterator_sym();
-  ant_value_t tag_sym = get_toStringTag_sym();
+  ant_value_t iter_sym = js->sym.iterator_sym;
+  ant_value_t tag_sym = js->sym.toStringTag_sym;
   
   js->builtins.map_iter_proto = js_mkobj(js);
   js_set_proto_init(js->builtins.map_iter_proto, js->sym.iterator_proto);
   js_set(js, js->builtins.map_iter_proto, "next", js_mkfun(map_iter_next));
   js_set_sym(js, js->builtins.map_iter_proto, tag_sym, js_mkstr(js, "Map Iterator", 12));
-  js_iter_register_advance(js->builtins.map_iter_proto, advance_map);
+  js_iter_register_advance(js, js->builtins.map_iter_proto, advance_map);
   
   js->builtins.set_iter_proto = js_mkobj(js);
   js_set_proto_init(js->builtins.set_iter_proto, js->sym.iterator_proto);
   js_set(js, js->builtins.set_iter_proto, "next", js_mkfun(set_iter_next));
   js_set_sym(js, js->builtins.set_iter_proto, tag_sym, js_mkstr(js, "Set Iterator", 12));
-  js_iter_register_advance(js->builtins.set_iter_proto, advance_set);
+  js_iter_register_advance(js, js->builtins.set_iter_proto, advance_set);
   
   ant_value_t map_proto = js_mkobj(js);
   js_set_proto_init(map_proto, object_proto);

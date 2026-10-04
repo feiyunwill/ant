@@ -1,4 +1,5 @@
 #include "ant.h"
+#include "builder.h"
 #include "errors.h"
 #include "esm/exports.h"
 #include "esm/loader.h"
@@ -18,10 +19,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-bool io_no_color = true;
-
-#define ANT_WASM_GC_STUB(name) \
-  void name(ant_t *js, gc_mark_fn mark) { (void)js; (void)mark; }
+// TODO: cleanup
+#define ANT_WASM_GC_STUB(name) void name(ant_t *js, gc_mark_fn mark) { (void)js; (void)mark; }
 
 ANT_WASM_GC_STUB(gc_mark_cron)
 ANT_WASM_GC_STUB(gc_mark_atomics)
@@ -344,7 +343,6 @@ static bool ant_wasm_drain_microtasks(
   if (check_rejections && !interrupted) js_check_unhandled_rejections(js);
   js->microtasks_draining = false;
   if (at_job_boundary) gc_weak_clear_kept_alive(js);
-  reap_retired_coroutines(js);
   return true;
 }
 
@@ -445,5 +443,3 @@ int crypto_fill_random(void *buf, size_t len) {
   if (len > UINT32_MAX) return -1;
   return ant_wasm_random_fill(buf, (uint32_t)len);
 }
-
-void init_async_iterator_helpers(ant_t *js) { (void)js; }
