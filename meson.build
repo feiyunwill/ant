@@ -479,6 +479,24 @@ gc_array_cards_test = executable(
 )
 test('gc-array-cards', gc_array_cards_test)
 
+code_unit_feedback_test = executable(
+  'test-code-unit-feedback',
+  files('tests/test_code_unit_feedback.c'),
+  dependencies: libant_dep,
+  c_args: ['-UNDEBUG'],
+  build_by_default: false
+)
+test('code-unit-feedback', code_unit_feedback_test)
+
+code_unit_ctor_proto_test = executable(
+  'test-code-unit-ctor-proto',
+  files('tests/test_code_unit_ctor_proto.c'),
+  dependencies: libant_dep,
+  c_args: ['-UNDEBUG'],
+  build_by_default: false
+)
+test('code-unit-ctor-proto', code_unit_ctor_proto_test)
+
 gc_two_isolates_test = executable(
   'test-gc-two-isolates',
   files('tests/test_gc_two_isolates.c'),
@@ -600,12 +618,13 @@ executable(
   build_by_default: false
 )
 
-executable(
+http_protocols_test = executable(
   'test-http-protocols',
   files('tests/test_http_protocols.c'),
   dependencies: libant_dep,
   build_by_default: false
 )
+test('http-protocols', http_protocols_test)
 
 embed_example = get_option('embed_example')
 embed_example_dist = 'packages/libant/dist'

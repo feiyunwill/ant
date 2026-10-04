@@ -87,6 +87,101 @@ __attribute__((noinline, cold)) void sv_ic_identities_reset(ant_t *js) {
   }
 }
 
+#define SV_POLY_LINK(list, block) do { \
+  (block)->prev = NULL;                \
+  (block)->link_next = (list);         \
+  if (list) (list)->prev = (block);    \
+  (list) = (block);                    \
+} while (0)
+
+#define SV_POLY_UNLINK(list, block) do {                            \
+  if ((block)->prev) (block)->prev->link_next = (block)->link_next; \
+  else (list) = (block)->link_next;                                 \
+  if ((block)->link_next) (block)->link_next->prev = (block)->prev; \
+} while (0)
+
+sv_gf_poly_t *sv_gf_poly_new(ant_t *js, sv_ic_entry_t *ic) {
+  sv_gf_poly_t *poly = calloc(1, sizeof(*poly));
+  if (!poly) return NULL;
+  
+  poly->kept_epoch = ant_ic_epoch_counter;
+  SV_POLY_LINK(js->ic.gf_polys, poly);
+  
+  ic->guard.get.poly = poly;
+  ic->shape_ref_mask |= SV_IC_HAS_GET_POLY;
+  
+  return poly;
+}
+
+sv_pf_poly_t *sv_pf_poly_new(ant_t *js, sv_ic_entry_t *ic) {
+  sv_pf_poly_t *poly = calloc(1, sizeof(*poly));
+  if (!poly) return NULL;
+  
+  poly->kept_epoch = ant_ic_epoch_counter;
+  SV_POLY_LINK(js->ic.pf_polys, poly);
+  
+  ic->put_poly = poly;
+  ic->shape_ref_mask |= SV_IC_HAS_PUT_POLY;
+  
+  return poly;
+}
+
+static void sv_gf_poly_destroy(sv_gf_poly_t *poly) {
+  for (unsigned i = 0; i < SV_GF_POLY_WAYS; i++)
+    if (poly->entries[i].shape) ant_shape_release(poly->entries[i].shape);
+  free(poly);
+}
+
+static void sv_pf_poly_destroy(sv_pf_poly_t *poly) {
+  for (unsigned i = 0; i < SV_GF_POLY_WAYS; i++) {
+    if (poly->entries[i].shape) ant_shape_release(poly->entries[i].shape);
+    if (poly->entries[i].to_shape) ant_shape_release(poly->entries[i].to_shape);
+  }
+  free(poly);
+}
+
+void sv_gf_poly_free(ant_t *js, sv_ic_entry_t *ic) {
+  if (!(ic->shape_ref_mask & SV_IC_HAS_GET_POLY)) return;
+  sv_gf_poly_t *poly = ic->guard.get.poly;
+  
+  ic->guard.get.poly = NULL;
+  ic->shape_ref_mask &= (sv_ic_flags_t)~SV_IC_HAS_GET_POLY;
+  if (!poly) return;
+  
+  SV_POLY_UNLINK(js->ic.gf_polys, poly);
+  sv_gf_poly_destroy(poly);
+}
+
+void sv_pf_poly_free(ant_t *js, sv_ic_entry_t *ic) {
+  if (!(ic->shape_ref_mask & SV_IC_HAS_PUT_POLY)) return;
+  sv_pf_poly_t *poly = ic->put_poly;
+  
+  ic->put_poly = NULL;
+  ic->shape_ref_mask &= (sv_ic_flags_t)~SV_IC_HAS_PUT_POLY;
+  if (!poly) return;
+  
+  SV_POLY_UNLINK(js->ic.pf_polys, poly);
+  sv_pf_poly_destroy(poly);
+}
+
+void sv_ic_polys_cleanup(ant_t *js) {
+  for (sv_gf_poly_t *poly = js->ic.gf_polys, *next; poly; poly = next) {
+    next = poly->link_next;
+    sv_gf_poly_destroy(poly);
+  }
+  
+  for (sv_pf_poly_t *poly = js->ic.pf_polys, *next; poly; poly = next) {
+    next = poly->link_next;
+    sv_pf_poly_destroy(poly);
+  }
+  
+  js->ic.gf_polys = NULL;
+  js->ic.pf_polys = NULL;
+}
+
+#undef SV_POLY_LINK
+#undef SV_POLY_UNLINK
+
 bool sv_ic_shape_ref_reserve(ant_t *js, size_t count) {
   if (!js) return false;
   if (js->ic.shape_ref_cap - js->ic.shape_ref_len >= count) return true;
@@ -115,6 +210,19 @@ fail:
   // unusable even if its caller writes a new index and epoch after failure.
   if (slot) *slot = NULL;
   return false;
+}
+
+void sv_ic_shape_refs_drop_dead(ant_t *js) {
+  if (!js) return;
+  size_t out = 0;
+  
+  for (size_t i = 0; i < js->ic.shape_ref_len; i++) {
+    ant_shape_t **slot = js->ic.shape_ref_slots[i];
+    if (slot && *slot == SV_IC_SHAPE_SLOT_DEAD) continue;
+    js->ic.shape_ref_slots[out++] = slot;
+  }
+  
+  js->ic.shape_ref_len = out;
 }
 
 void sv_ic_shape_refs_cleanup(ant_t *js) {
@@ -542,6 +650,8 @@ void js_set_error_site_from_bc(ant_t *js, sv_func_t *func, int bc_offset, const 
   } else return;
 
   js_set_error_site_lc(js, src, src_len, file, off, span_len, line, col);
+  js->errsite.unit = func->unit;
+  sv_code_unit_pin(func->unit);
 }
 
 void js_set_error_site_from_vm_top(ant_t *js) {
@@ -2856,7 +2966,7 @@ ant_value_t sv_execute_frame(sv_vm_t *vm, sv_func_t *func, ant_value_t this, ant
   L_PUT_CONST: {
     uint32_t idx = sv_get_u32(ip + 1);
     ant_value_t cached = vm->stack[--vm->sp];
-    VM_CHECK(gc_pin_permanent(js, cached) ? js_mkundef() : js_mkerr(js, "oom"));
+    VM_CHECK(sv_code_unit_retain_template(js, func, cached) ? js_mkundef() : js_mkerr(js, "oom"));
     func->constants[idx] = cached;
     NEXT(OP_PUT_CONST);
   }

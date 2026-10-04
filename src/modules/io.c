@@ -515,15 +515,15 @@ void print_repl_value(ant_t *js, ant_value_t val, FILE *stream) {
   ant_output_stream_t *out = ant_output_stream(stream);
 
   if (vtype(val) == kTypeString) {
-    char *str = js_getstr(js, val, NULL);
+    char cbuf[512];
+    js_cstr_t quoted = js_inspect_cstr(js, val, cbuf, sizeof(cbuf));
     ant_output_stream_begin(out);
     ant_output_stream_append_cstr(out, C(JSON_STRING));
-    ant_output_stream_putc(out, '\'');
-    ant_output_stream_append_cstr(out, str ? str : "");
-    ant_output_stream_putc(out, '\'');
+    ant_output_stream_append_cstr(out, quoted.ptr);
     ant_output_stream_append_cstr(out, C(C_RESET));
     ant_output_stream_putc(out, '\n');
     ant_output_stream_flush(out);
+    if (quoted.needs_free) free((void *)quoted.ptr);
     return;
   }
 
@@ -1362,6 +1362,14 @@ void inspect_object(ant_t *js, ant_value_t obj, FILE *stream, int depth, inspect
     
     switch (slot) {
       case SLOT_CODE:
+        if (t == kTypeString) {
+          ant_offset_t code_len = 0;
+          vstr(js, slot_val, &code_len);
+          fprintf(stream, "<source, %llu bytes>", (unsigned long long)code_len);
+          break;
+        }
+        fprintf(stream, "<native ptr 0x%" PRIx64 ">", (uint64_t)vdata(slot_val));
+        break;
       case SLOT_CFUNC:
         fprintf(stream, "<native ptr 0x%" PRIx64 ">", (uint64_t)vdata(slot_val));
         break;

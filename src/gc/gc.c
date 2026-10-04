@@ -56,7 +56,8 @@ static size_t gc_pool_live_bytes(ant_t *js) {
     + rope_old_stats.used
     + symbol_stats.used
     + bigint_stats.used
-    + string_stats.total.used;
+    + string_stats.total.used
+    + js->code_units.held_bytes;
 }
 
 size_t gc_live_major_threshold(ant_t *js) {
@@ -108,6 +109,12 @@ static size_t gc_heap_bytes(ant_t *js, size_t pool_bytes) {
     js->obj_arena.live_count * 
     js->obj_arena.elem_size + 
     js->alloc_bytes.arrays + pool_bytes;
+}
+
+size_t gc_code_major_threshold(ant_t *js) {
+  size_t pool = gc_pool_major_threshold(js);
+  size_t heap = gc_heap_bytes(js, js->gc.pool_last_live) / 8;
+  return pool > heap ? pool : heap;
 }
 
 static void gc_adapt_major_interval(
@@ -277,7 +284,7 @@ void gc_run(ant_t *js) {
   js->gc_running = true;
   
   uint64_t start_ns = gc_now_ns();
-  js->gc.alloc_since_major += gc_young_alloc_bytes(js) + js->gc.pool_alloc;
+  js->gc.alloc_since_major += gc_young_alloc_bytes(js) + js->gc.pool_alloc + js->gc.code_alloc;
   
   gc_ropes_begin_result_t rope_begin = gc_ropes_begin(js, false);
   ANT_ASSERT(
@@ -308,6 +315,7 @@ void gc_run(ant_t *js) {
 
   js->gc.pool_last_live = gc_pool_live_bytes(js);
   js->gc.pool_alloc = 0;
+  js->gc.code_alloc = 0;
   js->rope_gc.young_alloc = 0;
   js->gc.closure_alloc = 0;
   js->gc.closure_at_minor = 0;
@@ -410,6 +418,7 @@ static void gc_decide(ant_t *js) {
       
       if (live_before_minor >= major_threshold) major_due = true;
       else if (js->gc.pool_alloc >= pool_threshold) major_due = true;
+      else if (js->gc.code_alloc >= gc_code_major_threshold(js)) major_due = true;
       else if (js->closure_arena.watermark - js->gc.closure_wm_at_major >= GC_CLOSURE_MAJOR_GROWTH) major_due = true;
       else if (js->gc_closure_promoted_since_major >= GC_CLOSURE_PROMOTED_MAJOR) major_due = true;
       else if (js->alloc_bytes.arrays >= js->gc.array_major_limit) major_due = true;
@@ -491,14 +500,15 @@ void gc_maybe(ant_t *js) {
 
 size_t gc_alloc_marker(ant_t *js) {
   return js->obj_arena.live_count + js->alloc_bytes.arrays
-    + js->gc.pool_alloc + js->gc.closure_alloc;
+    + js->gc.pool_alloc + js->gc.code_alloc + js->gc.closure_alloc;
 }
 
 static bool gc_idle_major_due(ant_t *js) {
   size_t last = js->gc.last_live;
   size_t threshold = gc_live_major_threshold(js);
   return js->obj_arena.live_count >= last + (threshold - last) / 2
-    || js->gc.pool_alloc >= gc_pool_major_threshold(js) / 2;
+    || js->gc.pool_alloc >= gc_pool_major_threshold(js) / 2
+    || js->gc.code_alloc >= gc_code_major_threshold(js) / 2;
 }
 
 static size_t gc_young_count(ant_t *js) {

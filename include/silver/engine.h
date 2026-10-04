@@ -178,11 +178,15 @@ typedef enum: uint8_t {
   SV_IC_SHAPE_REF_ADD_TO   = 1u << 2,
   SV_IC_POLY_MEGA          = 1u << 3,
   SV_IC_MEGA_COMPILED      = 1u << 4,
+  SV_IC_HAS_GET_POLY       = 1u << 5,
+  SV_IC_HAS_PUT_POLY       = 1u << 6,
 } sv_ic_flags_t;
 
 static_assert(
-  (SV_IC_SHAPE_REF_CACHED | SV_IC_SHAPE_REF_ADD_FROM | SV_IC_SHAPE_REF_ADD_TO | SV_IC_POLY_MEGA | SV_IC_MEGA_COMPILED) == 
-  (SV_IC_SHAPE_REF_CACHED + SV_IC_SHAPE_REF_ADD_FROM + SV_IC_SHAPE_REF_ADD_TO + SV_IC_POLY_MEGA + SV_IC_MEGA_COMPILED),
+  (SV_IC_SHAPE_REF_CACHED | SV_IC_SHAPE_REF_ADD_FROM | SV_IC_SHAPE_REF_ADD_TO | 
+  SV_IC_POLY_MEGA | SV_IC_MEGA_COMPILED | SV_IC_HAS_GET_POLY | SV_IC_HAS_PUT_POLY) ==
+  (SV_IC_SHAPE_REF_CACHED + SV_IC_SHAPE_REF_ADD_FROM + SV_IC_SHAPE_REF_ADD_TO + 
+  SV_IC_POLY_MEGA + SV_IC_MEGA_COMPILED + SV_IC_HAS_GET_POLY + SV_IC_HAS_PUT_POLY),
   "IC flags must not share bits"
 );
 
@@ -232,12 +236,13 @@ sv_gf_mega_cache_t *sv_gf_mega_ensure(ant_t *js);
 void sv_gf_mega_clear(ant_t *js);
 void sv_ic_identities_reset(ant_t *js);
 
-typedef struct sv_gf_poly {
+struct sv_gf_poly {
   sv_gf_poly_entry_t entries[SV_GF_POLY_WAYS];
   uint8_t next;
   uint32_t kept;
   uint32_t kept_epoch;
-} sv_gf_poly_t;
+  sv_gf_poly_t *prev, *link_next;
+};
 
 typedef struct {
   ant_shape_t *shape;
@@ -248,12 +253,18 @@ typedef struct {
   bool add;
 } sv_pf_poly_entry_t;
 
-typedef struct sv_pf_poly {
+struct sv_pf_poly {
   sv_pf_poly_entry_t entries[SV_GF_POLY_WAYS];
   uint8_t next;
   uint32_t kept;
   uint32_t kept_epoch;
-} sv_pf_poly_t;
+  sv_pf_poly_t *prev, *link_next;
+};
+
+static_assert(
+  offsetof(sv_gf_poly_t, entries) == 0, 
+  "compiled code walks poly entries from the block"
+);
 
 typedef struct {
   ant_shape_t *cached_shape;
@@ -310,6 +321,13 @@ static_assert(
   "IC entries must remain 64 bytes"
 );
 
+sv_gf_poly_t *sv_gf_poly_new(ant_t *js, sv_ic_entry_t *ic);
+sv_pf_poly_t *sv_pf_poly_new(ant_t *js, sv_ic_entry_t *ic);
+
+void sv_gf_poly_free(ant_t *js, sv_ic_entry_t *ic);
+void sv_pf_poly_free(ant_t *js, sv_ic_entry_t *ic);
+void sv_ic_polys_cleanup(ant_t *js);
+
 static_assert(
   offsetof(sv_ic_entry_t, get_kind) < 24 &&
   offsetof(sv_ic_entry_t, epoch) < 24 &&
@@ -320,6 +338,7 @@ static_assert(
 bool sv_ic_shape_ref_register(ant_t *js, ant_shape_t **slot);
 bool sv_ic_shape_ref_reserve(ant_t *js, size_t count);
 void sv_ic_shape_refs_cleanup(ant_t *js);
+void sv_ic_shape_refs_drop_dead(ant_t *js);
 
 typedef struct {
   uint32_t bc_off;
@@ -339,8 +358,8 @@ static constexpr uintptr_t SV_GF_IC_AUX_WARMUP_MASK = (uintptr_t)0xFFu;
 static constexpr uintptr_t SV_GF_IC_AUX_MISS_MASK   = (uintptr_t)0xFF00u;
 static constexpr uintptr_t SV_GF_IC_AUX_ACTIVE_BIT  = (uintptr_t)0x10000u;
 
-#define SV_GF_IC_AUX_ALL_MASK \
-  (SV_GF_IC_AUX_WARMUP_MASK | SV_GF_IC_AUX_MISS_MASK | SV_GF_IC_AUX_ACTIVE_BIT)
+#define SV_IC_SHAPE_SLOT_DEAD ((ant_shape_t *)(uintptr_t)1)
+#define SV_GF_IC_AUX_ALL_MASK (SV_GF_IC_AUX_WARMUP_MASK | SV_GF_IC_AUX_MISS_MASK | SV_GF_IC_AUX_ACTIVE_BIT)
 
 static inline uint8_t sv_gf_ic_warmup(uintptr_t aux) {
   return (uint8_t)(aux & SV_GF_IC_AUX_WARMUP_MASK);
@@ -355,8 +374,9 @@ static inline bool sv_gf_ic_active(uintptr_t aux) {
 }
 
 static inline uintptr_t sv_gf_ic_pack_aux(uint8_t warmup, uint8_t miss_streak, bool active) {
-  uintptr_t aux = ((uintptr_t)warmup & SV_GF_IC_AUX_WARMUP_MASK) |
-                  ((uintptr_t)miss_streak << SV_GF_IC_AUX_MISS_SHIFT);
+  uintptr_t aux = 
+    ((uintptr_t)warmup & SV_GF_IC_AUX_WARMUP_MASK) |
+    ((uintptr_t)miss_streak << SV_GF_IC_AUX_MISS_SHIFT);
   if (active) aux |= SV_GF_IC_AUX_ACTIVE_BIT;
   return aux;
 }
@@ -544,7 +564,16 @@ struct sv_func {
 
   bool jit_inline_reuse_checked: 1;
   bool jit_inline_reuse_empty: 1;
+  bool fb_unit_watched: 1;
+  bool fb_unit_target: 1;
+
+  sv_code_unit_t *unit;
+  struct sv_func *unit_next;
 };
+
+static inline void sv_func_retain_for_jit(sv_func_t *func) {
+  if (func && func->unit) func->unit->immortal = true;
+}
 
 static inline const sv_map_template_desc_t *sv_map_template_desc_at(
   const sv_func_t *func, uint32_t index
