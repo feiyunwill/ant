@@ -1,6 +1,7 @@
 #include "ptr.h"
 #include "sugar.h"
 #include "shapes.h"
+#include "utils.h"
 
 #include "jit/entry_stub.h"
 #include "silver/engine.h"
@@ -397,19 +398,17 @@ static constexpr size_t GC_FUNC_WORKLIST_RETAIN = 1024;
 static void gc_func_trace(ant_t *js, sv_func_t *func);
 
 static void gc_func_push(ant_t *js, sv_func_t *func) {
-  if (js->gc.func_sp >= js->gc.func_cap) {
-    size_t cap = js->gc.func_cap ? js->gc.func_cap * 2 : 256;
-    sv_func_t **grown = realloc(js->gc.func_stack, cap * sizeof(*grown));
-    
-    if (!grown) {
-      gc_func_trace(js, func);
-      return;
-    }
-    
-    js->gc.func_stack = grown;
-    js->gc.func_cap = cap;
+  sv_func_t **stack = vec_grow(
+    js->gc.func_stack, &js->gc.func_cap,
+    js->gc.func_sp + 1, sizeof(*stack), 256
+  );
+  
+  if (!stack) {
+    gc_func_trace(js, func);
+    return;
   }
   
+  js->gc.func_stack = stack;
   js->gc.func_stack[js->gc.func_sp++] = func;
 }
 
@@ -437,14 +436,13 @@ static void gc_func_enqueue(ant_t *js, sv_func_t *func) {
 }
 
 static bool gc_fb_reserve(ant_t *js) {
-  if (js->gc.fb_len < js->gc.fb_cap) return true;
-  size_t cap = js->gc.fb_cap ? js->gc.fb_cap * 2 : 256;
+  sv_func_t **funcs = vec_grow(
+    js->gc.fb_funcs, &js->gc.fb_cap,
+    js->gc.fb_len + 1, sizeof(*funcs), 256
+  );
   
-  sv_func_t **grown = realloc(js->gc.fb_funcs, cap * sizeof(*grown));
-  if (!grown) return false;
-  
-  js->gc.fb_funcs = grown;
-  js->gc.fb_cap = cap;
+  if (!funcs) return false;
+  js->gc.fb_funcs = funcs;
   
   return true;
 }
